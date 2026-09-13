@@ -162,6 +162,9 @@ class EtherCATMaster:
         self._thread = None
         self._stop = False
         self._lock = threading.Lock()
+        self._sdo_queue = []
+        self._sdo_lock = threading.Lock()
+        self.last_sdo = {}
 
         for s in self.servos:
             logging.info("ethercat: configured servo '%s' slave=%d"
@@ -182,6 +185,13 @@ class EtherCATMaster:
                                     desc="Disable servos: ETHERCAT_DISABLE [NAME=<n>]")
         self.gcode.register_command('ETHERCAT_MOVE', self.cmd_MOVE,
                                     desc="ETHERCAT_MOVE NAME=<n> POS=<u> [VEL=] [ACCEL=]")
+        self.gcode.register_command('ETHERCAT_SDO_READ', self.cmd_SDO_READ,
+                                    desc="ETHERCAT_SDO_READ SLAVE=<i> INDEX=<hex> [SUB=0] [SIZE=2]")
+        self.gcode.register_command('ETHERCAT_SDO_WRITE', self.cmd_SDO_WRITE,
+                                    desc="ETHERCAT_SDO_WRITE SLAVE=<i> INDEX=<hex> [SUB=0] VALUE=<n> [SIZE=2]")
+        self.gcode.register_command('ETHERCAT_CIA402_INIT', self.cmd_CIA402_INIT,
+                                    desc="SDO-based CiA402 commissioning: "
+                                         "ETHERCAT_CIA402_INIT SLAVE=<i> [OPMODE=8]")
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -235,6 +245,12 @@ class EtherCATMaster:
         self.state = 'init'
         if n <= 0:
             self.state = 'scanning (no slaves)'
+            self._drain_sdo_queue(m)
+            with self._sdo_lock:
+                pending = len(self._sdo_queue)
+            if pending:
+                time.sleep(0.05)   # keep ctx open while SDO/debug ops are queued
+                return
             self._close_ctx()
             for _ in range(50):
                 if self._stop:
@@ -296,6 +312,7 @@ class EtherCATMaster:
             with self._lock:
                 servos = list(self.servos)
                 cnt = self.slave_count
+            self._drain_sdo_queue(m)
             for s in servos:
                 if s.slave_index < cnt:
                     s.planner_step(period)
@@ -416,6 +433,114 @@ class EtherCATMaster:
         gcmd.respond_info("EtherCAT: '%s' -> %s (vel=%s acc=%s)"
                           % (s.name, s.target, s.def_velocity, s.def_accel))
 
+    # -- SDO passthrough (commissioning without printer.cfg config) --------
+
+    def _sdo_execute(self, payload):
+        ev = threading.Event()
+        item = dict(payload)
+        item['_result'] = {}
+        item['_event'] = ev
+        with self._sdo_lock:
+            self._sdo_queue.append(item)
+        if not ev.wait(8.0):
+            return {'ok': False, 'error': 'timeout waiting for bus thread'}
+        return item['_result']
+
+    def _drain_sdo_queue(self, m):
+        with self._sdo_lock:
+            ops = list(self._sdo_queue)
+            self._sdo_queue = []
+        for op in ops:
+            res = {}
+            try:
+                if self.slave_count <= 0 or op['slave'] >= self.slave_count:
+                    raise Exception('slave %d not on the bus (%d slaves)'
+                                    % (op.get('slave', -1), self.slave_count))
+                sl = m.slaves[op['slave']]
+                if op['type'] == 'read':
+                    data = sl.sdo_read(op['index'], op['sub'], op.get('size', 2))
+                    res = {'ok': True,
+                           'value': int.from_bytes(data, 'little'),
+                           'hex': data.hex()}
+                elif op['type'] == 'write':
+                    sl.sdo_write(op['index'], op['sub'], op['data'])
+                    res = {'ok': True, 'value': op.get('value')}
+                elif op['type'] == 'cia402':
+                    self._cia402_sdo_sequence(sl, op.get('opmode', 8))
+                    res = {'ok': True}
+            except Exception as e:
+                res = {'ok': False, 'error': str(e)}
+            for k in ('type', 'slave', 'index', 'sub'):
+                if k in op:
+                    res[k] = op[k]
+            res['ts'] = time.time()
+            op['_result'].update(res)
+            op['_event'].set()
+            self.last_sdo = res
+
+    def _cia402_sdo_sequence(self, sl, opmode):
+        """Slow SDO-based CiA402 bring-up, for commissioning before CSP."""
+        sl.sdo_write(0x6060, 0, bytes([opmode & 0xFF]))        # modes of operation
+        sl.sdo_write(0x6040, 0, struct.pack('<H', 0x80))       # fault reset
+        time.sleep(0.1)
+        steps = [(0x06, 0x31), (0x07, 0x33), (0x0F, 0x37)]
+        for cw, expect in steps:
+            sl.sdo_write(0x6040, 0, struct.pack('<H', cw))
+            deadline = time.time() + 1.5
+            while time.time() < deadline:
+                sw = int.from_bytes(sl.sdo_read(0x6041, 0, 2), 'little')
+                if (sw & 0x6F) == expect:
+                    break
+                time.sleep(0.05)
+            else:
+                raise Exception('CiA402 sequence stalled (cw=0x%02X)' % cw)
+            time.sleep(0.05)
+
+    def _parse_num(self, s, default=None):
+        s = str(s).strip()
+        if s == '':
+            return default
+        return int(s, 0)
+
+    def cmd_SDO_READ(self, gcmd):
+        slave = gcmd.get_int('SLAVE', 0, minval=0)
+        index = self._parse_num(gcmd.get('INDEX'), 0)
+        sub = gcmd.get_int('SUB', 0, minval=0)
+        size = gcmd.get_int('SIZE', 2, minval=1, maxval=4)
+        if index is None:
+            raise gcode.error("INDEX required (hex with 0x prefix, e.g. 0x6041)")
+        res = self._sdo_execute({'type': 'read', 'slave': slave,
+                                 'index': index, 'sub': sub, 'size': size})
+        if not res.get('ok'):
+            raise gcode.error("SDO read failed: %s" % (res.get('error'),))
+        gcmd.respond_info("SDO 0x%04X:%d = 0x%s (%d)"
+                          % (index, sub, res.get('hex', ''), res.get('value', 0)))
+
+    def cmd_SDO_WRITE(self, gcmd):
+        slave = gcmd.get_int('SLAVE', 0, minval=0)
+        index = self._parse_num(gcmd.get('INDEX'), 0)
+        sub = gcmd.get_int('SUB', 0, minval=0)
+        size = gcmd.get_int('SIZE', 2, minval=1, maxval=4)
+        value = self._parse_num(gcmd.get('VALUE'), 0)
+        if index is None:
+            raise gcode.error("INDEX required")
+        data = value.to_bytes(size, 'little')
+        res = self._sdo_execute({'type': 'write', 'slave': slave, 'index': index,
+                                 'sub': sub, 'data': data, 'value': value})
+        if not res.get('ok'):
+            raise gcode.error("SDO write failed: %s" % (res.get('error'),))
+        gcmd.respond_info("SDO 0x%04X:%d <- 0x%X (size %d)"
+                          % (index, sub, value, size))
+
+    def cmd_CIA402_INIT(self, gcmd):
+        slave = gcmd.get_int('SLAVE', 0, minval=0)
+        opmode = self._parse_num(gcmd.get('OPMODE', '8'), 8)
+        res = self._sdo_execute({'type': 'cia402', 'slave': slave, 'opmode': opmode})
+        if not res.get('ok'):
+            raise gcode.error("CiA402 init failed: %s" % (res.get('error'),))
+        gcmd.respond_info("CiA402 bring-up done (opmode %d) - drive operation-enabled"
+                          % (opmode,))
+
     # -- moonraker ----------------------------------------------------------
 
     def get_status(self, eventtime):
@@ -434,6 +559,7 @@ class EtherCATMaster:
             names = list(self.slave_names)
             cnt = self.slave_count
         return {
+            'last_sdo': self.last_sdo,
             'state': self.state,
             'interface': self.ifname,
             'cycle_time': self.cycle_time,

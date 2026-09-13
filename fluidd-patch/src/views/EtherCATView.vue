@@ -175,6 +175,111 @@
           </ol>
         </div>
       </collapsable-card>
+
+      <collapsable-card
+        title="SDO Commissioning"
+        icon="$codeJson"
+        :collapsable="true"
+        class="mb-2 mb-md-4"
+      >
+        <template #menu>
+          <span
+            class="caption mr-2"
+            :style="{ color: lastSdoOk === false ? '#ff5252' : '#4caf50' }"
+          >{{ lastSdoText }}</span>
+        </template>
+
+        <div class="py-1">
+          <div class="ecat-note pb-2">
+            Read/write any CoE object on a bus slave — commission drives without
+            printer.cfg sections. Index accepts hex (0x6041). Values: decimal or
+            0x-hex. CiA402 INIT runs the slow SDO power-up sequence (opmode
+            0x6060 → CW 6/7/0x0F).
+          </div>
+          <v-row no-gutters>
+            <v-col
+              cols="3"
+              class="pr-1"
+            >
+              <app-text-field
+                v-model="sdoSlave"
+                label="Slave"
+                small
+              />
+            </v-col>
+            <v-col
+              cols="3"
+              class="px-1"
+            >
+              <app-text-field
+                v-model="sdoIndex"
+                label="Index (hex)"
+                small
+              />
+            </v-col>
+            <v-col
+              cols="3"
+              class="px-1"
+            >
+              <app-text-field
+                v-model="sdoSub"
+                label="Sub"
+                small
+              />
+            </v-col>
+            <v-col
+              cols="3"
+              class="pl-1"
+            >
+              <app-text-field
+                v-model="sdoSize"
+                label="Size"
+                small
+              />
+            </v-col>
+          </v-row>
+          <v-row no-gutters>
+            <v-col
+              cols="6"
+              class="pr-1"
+            >
+              <app-text-field
+                v-model="sdoValue"
+                label="Value (write)"
+                small
+              />
+            </v-col>
+            <v-col
+              class="d-flex align-center justify-end"
+            >
+              <app-btn
+                small
+                class="ma-1"
+                :disabled="!klippyReady"
+                @click="sdoRead()"
+              >
+                READ
+              </app-btn>
+              <app-btn
+                small
+                class="ma-1"
+                :disabled="!klippyReady"
+                @click="sdoWrite()"
+              >
+                WRITE
+              </app-btn>
+              <app-btn
+                small
+                class="ma-1"
+                :disabled="!klippyReady"
+                @click="sdoCia402()"
+              >
+                CiA402 INIT
+              </app-btn>
+            </v-col>
+          </v-row>
+        </div>
+      </collapsable-card>
     </v-col>
   </v-row>
 </template>
@@ -198,10 +303,54 @@ export default class EtherCATView extends Mixins(StateMixin) {
   inputTargets: Record<string, string> = {}
   inputVels: Record<string, string> = {}
   inputAccs: Record<string, string> = {}
+  sdoSlave = '0'
+  sdoIndex = '0x6041'
+  sdoSub = '0'
+  sdoSize = '2'
+  sdoValue = '0'
 
   get ethercat (): any {
     const st = (this.$typedState as any).printer.printer.ethercat
     return st || {}
+  }
+
+  get lastSdo (): any {
+    return this.ethercat.last_sdo || {}
+  }
+
+  get lastSdoOk (): boolean | null {
+    const l = this.lastSdo
+    if (l.ts == null) return null
+    return !!l.ok
+  }
+
+  get lastSdoText (): string {
+    const l = this.lastSdo
+    if (l.ts == null) return ''
+    if (l.ok) {
+      if (l.type === 'read') {
+        return '0x' + Number(l.index).toString(16) + ':' + l.sub + ' = 0x' + (l.hex || '')
+      }
+      return 'write ok'
+    }
+    return 'error: ' + (l.error || '')
+  }
+
+  sdoRead () {
+    this.send('ETHERCAT_SDO_READ SLAVE=' + this.sdoSlave +
+              ' INDEX=' + this.sdoIndex + ' SUB=' + this.sdoSub +
+              ' SIZE=' + this.sdoSize)
+  }
+
+  sdoWrite () {
+    this.send('ETHERCAT_SDO_WRITE SLAVE=' + this.sdoSlave +
+              ' INDEX=' + this.sdoIndex + ' SUB=' + this.sdoSub +
+              ' VALUE=' + this.sdoValue + ' SIZE=' + this.sdoSize)
+  }
+
+  sdoCia402 () {
+    this.send('ETHERCAT_CIA402_INIT SLAVE=' + this.sdoSlave +
+              ' OPMODE=8')
   }
 
   get klippyReady (): boolean {

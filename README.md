@@ -23,7 +23,11 @@ Klipper (host) ── klippy/extras/ethercat.py ── SOEM ── raw NIC ─�
 - CiA402 power-up state machine (shutdown → switch on → operation enabled)
   driven automatically by `ETHERCAT_ENABLE`
 - Built-in trapezoidal streaming planner per servo (`ETHERCAT_MOVE`)
-- Live status in Moonraker (`get_status`) and a Fluidd dashboard card
+- SDO passthrough (read/write any CoE object, CiA402 commissioning sequence)
+  for bringing up drives **without** printer.cfg sections
+- Live status in Moonraker (`get_status`) and a native Fluidd page
+  (nav entry below Settings) with the master status, per-servo controls and an
+  SDO commissioning panel
 
 ## Install (Debian-style Klipper host, e.g. a mini PC)
 
@@ -90,6 +94,9 @@ sudo systemctl restart klipper
 | `ETHERCAT_ENABLE [NAME=<n>]` | Bring bus to OP + run the CiA402 power-up sequence |
 | `ETHERCAT_DISABLE [NAME=<n>]` | Shutdown (servos go to ready-to-switch-on) |
 | `ETHERCAT_MOVE NAME=<n> POS=<u> [VEL=] [ACCEL=]` | Trapezoidal move in user units |
+| `ETHERCAT_SDO_READ SLAVE=<i> INDEX=<hex> [SUB=0] [SIZE=2]` | Read any CoE object on a bus slave |
+| `ETHERCAT_SDO_WRITE SLAVE=<i> INDEX=<hex> [SUB=0] VALUE=<n> [SIZE=2]` | Write any CoE object |
+| `ETHERCAT_CIA402_INIT SLAVE=<i> [OPMODE=8]` | Slow SDO-based CiA402 bring-up (opmode + CW 6/7/0x0F) |
 
 ## Hardware notes
 
