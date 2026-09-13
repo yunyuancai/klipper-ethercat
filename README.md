@@ -53,10 +53,19 @@ cycle_time: 0.001
 #acceleration: 1000.0
 EOF
 
-# 5. Fluidd card (patches fluidd's index.html, see embed/)
+# 5. Fluidd card + full control page (patches fluidd's index.html)
 sudo bash embed/install-ecat-panel.sh
 sudo systemctl restart klipper
 ```
+
+`install-ecat-panel.sh` injects two scripts into Fluidd:
+
+- a dashboard card (below the temperature panel) with live master/servo status
+- a **full EtherCAT control page**: an "EtherCAT" entry is added to the Fluidd
+  navigation (below Settings) — open it for the master status, per-servo
+  enable/disable, target position / velocity / acceleration inputs with MOVE
+  and HOLD buttons. Commands run through the Moonraker websocket and require
+  klippy to be in the ready state.
 
 ## G-code
 
