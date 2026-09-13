@@ -34,11 +34,26 @@ Klipper (host) ── klippy/extras/ethercat.py ── SOEM ── raw NIC ─�
 # 2. the klippy extra
 cp klippy/extras/ethercat.py ~/klipper/klippy/extras/
 
-# 3. klipper needs CAP_NET_RAW to open a raw EtherCAT socket
+# 3. klipper needs CAP_NET_RAW for the raw EtherCAT socket, plus realtime
+#    scheduling and a performance governor for low-jitter cycling
+#    (measured on a J1900: worst-case cycle jitter 0.885 ms -> 0.083 ms)
 sudo mkdir -p /etc/systemd/system/klipper.service.d
-printf '[Service]\nAmbientCapabilities=CAP_NET_RAW\n' \
-  | sudo tee /etc/systemd/system/klipper.service.d/ethercat.conf
+printf '[Service]
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=80
+'   | sudo tee /etc/systemd/system/klipper.service.d/ethercat.conf
+printf '[Unit]
+Description=Set CPU governor to performance
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > \$g; done"
+[Install]
+WantedBy=multi-user.target
+'   | sudo tee /etc/systemd/system/cpu-governor.service
 sudo systemctl daemon-reload
+sudo systemctl enable --now cpu-governor
 
 # 4. config (append to printer.cfg)
 cat >> ~/printer_data/config/printer.cfg <<'EOF'
